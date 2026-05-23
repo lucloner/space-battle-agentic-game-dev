@@ -1872,26 +1872,26 @@
     }
     #gp-left {
       position: absolute;
-      bottom: 40px;
-      left: 30px;
-      width: 140px;
-      height: 140px;
+      bottom: 60px;
+      left: 20px;
+      width: 160px;
+      height: 160px;
       pointer-events: auto;
     }
     #joystick-zone {
-      width: 140px;
-      height: 140px;
+      width: 160px;
+      height: 160px;
       border-radius: 50%;
-      background: rgba(255,255,255,0.08);
-      border: 2px solid rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.1);
+      border: 2px solid rgba(255,255,255,0.25);
       position: relative;
       touch-action: none;
     }
     #joystick-knob {
-      width: 50px;
-      height: 50px;
+      width: 60px;
+      height: 60px;
       border-radius: 50%;
-      background: rgba(0,229,255,0.5);
+      background: rgba(0,229,255,0.45);
       border: 2px solid rgba(0,229,255,0.8);
       position: absolute;
       top: 50%;
@@ -1901,49 +1901,59 @@
     }
     #gp-right {
       position: absolute;
-      bottom: 40px;
+      bottom: 50px;
       right: 20px;
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 12px;
+      gap: 14px;
       pointer-events: auto;
     }
     .gp-btn {
-      width: 64px;
-      height: 64px;
+      width: 76px;
+      height: 76px;
       border-radius: 50%;
-      border: 2px solid rgba(255,255,255,0.3);
-      background: rgba(255,255,255,0.1);
+      border: 2px solid rgba(255,255,255,0.35);
+      background: rgba(0,0,0,0.55);
       color: #fff;
-      font: bold 11px 'Courier New',monospace;
+      font: bold 13px 'Courier New',monospace;
       cursor: pointer;
       touch-action: none;
       user-select: none;
       -webkit-user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     .gp-btn:active, .gp-btn.pressed {
-      background: rgba(0,229,255,0.4);
+      background: rgba(0,229,255,0.5);
       border-color: #00e5ff;
     }
-    .gp-fire    { border-color: #00e5ff; color: #00e5ff; }
-    .gp-missile { border-color: #ff6bff; color: #ff6bff; }
-    .gp-dodge   { border-color: #ffeb3b; color: #ffeb3b; }
-    .gp-auto    { border-color: #6c5ce7; color: #6c5ce7; }
+    .gp-fire    { border-color: #00e5ff; color: #00e5ff; background: rgba(0,0,0,0.6); }
+    .gp-missile { border-color: #ff6bff; color: #ff6bff; background: rgba(0,0,0,0.6); }
+    .gp-dodge   { border-color: #ffeb3b; color: #ffeb3b; background: rgba(0,0,0,0.6); }
+    .gp-auto    { border-color: #6c5ce7; color: #6c5ce7; background: rgba(0,0,0,0.6); }
     .gp-auto.active { background: rgba(108,92,231,0.5); }
     #gp-bottom {
       position: absolute;
-      bottom: 8px;
+      bottom: 12px;
       left: 50%;
       transform: translateX(-50%);
       display: flex;
-      gap: 16px;
+      gap: 20px;
       pointer-events: auto;
     }
     #gp-bottom .gp-btn {
-      width: 80px;
-      height: 40px;
-      border-radius: 20px;
-      font-size: 12px;
+      width: 90px;
+      height: 46px;
+      border-radius: 23px;
+      font-size: 14px;
+      background: rgba(0,0,0,0.65);
+      border-color: rgba(255,255,255,0.4);
+      color: #fff;
+    }
+    #gp-bottom .gp-btn:active {
+      background: rgba(0,229,255,0.4);
+      border-color: #00e5ff;
     }
   </style>
 
