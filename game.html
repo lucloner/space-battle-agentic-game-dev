@@ -1,13 +1,2073 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <title>Space Blaster</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.8;
+      color: #222;
+    }
+
+    canvas {
+      display: block;
+      margin: 20px auto;
+      border: 1px solid #111;
+      outline: none;
+    }
+
+    .doc {
+      max-width: 780px;
+      margin: 0 auto 60px;
+      padding: 0 20px;
+    }
+    .doc h1 { font-size: 28px; margin-bottom: 16px; color: #111; }
+    .doc h2 { font-size: 20px; margin: 32px 0 12px; color: #333; border-bottom: 1px solid #e0e0e0; padding-bottom: 6px; }
+    .doc h3 { font-size: 17px; margin: 24px 0 8px; color: #444; }
+    .doc p  { margin-bottom: 14px; font-size: 15px; }
+    .doc blockquote {
+      border-left: 4px solid #6c5ce7; padding: 10px 16px; margin: 16px 0;
+      background: #f8f7ff; color: #555; font-style: italic; border-radius: 0 6px 6px 0;
+    }
+    .doc pre, .doc code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 13px;
+    }
+    .doc code {
+      background: #f0f0f0; padding: 2px 6px; border-radius: 3px; color: #d63384;
+    }
+    .doc pre {
+      background: #f5f5f5; padding: 14px 16px; border-radius: 6px; overflow-x: auto; margin: 14px 0; line-height: 1.5;
+    }
+    .doc pre code { background: none; padding: 0; color: inherit; }
+    .doc table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+    .doc th, .doc td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+    .doc th { background: #f9f9f9; font-weight: 600; }
+    .doc ul, .doc ol { margin: 10px 0 14px 24px; font-size: 15px; }
+    .doc li { margin-bottom: 4px; }
+    .doc hr { border: none; border-top: 1px solid #ddd; margin: 28px 0; }
+    .arch pre { background: #0d1117; color: #c9d1d9; font-size: 12px; line-height: 1.4; }
+  </style>
 </head>
+
 <body>
   <canvas id="gameCanvas"></canvas>
   <script>
-    // agents build everything here
+    // [GAMEPLAY] state, scoring, spawning, game loop
+
+    // ===== STATE =====
+    const state = {
+      player: null,
+      bullets: [],
+      missiles: [],
+      enemyBullets: [],
+      enemies: [],
+      particles: [],
+      smokeParticles: [],
+      pickups: [],        // [GAMEPLAY-CHALLENGES] shield power-ups
+      stars: [],
+      vfx: { shake: 0, shakeX: 0, shakeY: 0, flashAlpha: 0, flashColor: '#ff0000', vignette: 0, trail: [] },
+      score: 0,
+      highScore: 0,         // [GAMEPLAY-CHALLENGES] loaded from localStorage
+      lives: 3,
+      level: 1,
+      shield: 0,
+      gameOver: false,
+      paused: false,
+      enemySpawnTimer: 0,
+      warpEffect: { active: false, timer: 0, duration: 60 },
+      // Legacy fields kept for compatibility with physics-movement
+      spawnTimer: 0,
+      spawnInterval: 90,
+      scoreToNextLevel: 500,
+      // [GAMEPLAY-CHALLENGES] combo system
+      comboTimer: 0,
+      comboCount: 0,
+      // [GAMEPLAY-CHALLENGES] survival wave
+      survivalWaveActive: false,
+      survivalWaveTimer: 0,
+      survivalWaveTriggered: false, // only trigger once per level
+      // [BOSS-AI] boss system
+      boss: null,
+      bossActive: false,
+      bossBullets: [],
+      // Auto-mode (Y key)
+      autoMode: false,
+    };
+
+    // ===== CANVAS SETUP =====
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 800;
+    canvas.height = 600;
+    canvas.setAttribute('tabindex', '0');
+    canvas.focus();
+
+    // [UI-RENDERER] visual foundation
+
+    // ===== STAR FIELD =====
+    function initStars() {
+      state.stars = [];
+      for (let i = 0; i < 120; i++) {
+        state.stars.push({
+          x: Math.random() * canvas.width,
+          y: Math.random() * canvas.height,
+          speed: 0.3 + Math.random() * 2.5,
+          brightness: 0.3 + Math.random() * 0.7,
+          radius: 0.5 + Math.random() * 1.5
+        });
+      }
+    }
+
+    // ===== EXPLODE (particles) =====
+    function explode(x, y, color, count = 18) {
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 1 + Math.random() * 4;
+        state.particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          radius: 2 + Math.random() * 4,
+          life: 1.0,
+          decay: 0.025 + Math.random() * 0.02,
+          color: color || '#ff6b35'
+        });
+      }
+    }
+
+    // ===== CHECK LEVEL UP =====
+    function checkLevelUp() {
+      if (state.score >= state.level * 500) {
+        state.level++;
+        // [VFX] level-up white flash
+        state.vfx.flashAlpha = 0.6;
+        state.vfx.flashColor = '#ffffff';
+        state.scoreToNextLevel = state.level * 500;
+        // Speed up spawns with higher levels
+        state.spawnInterval = Math.max(30, 90 - state.level * 8);
+        // [GAMEPLAY-CHALLENGES] trigger survival wave at level 3
+        if (state.level === 3 && !state.survivalWaveTriggered) {
+          state.survivalWaveActive = true;
+          state.survivalWaveTimer = 10; // 10 seconds
+          state.survivalWaveTriggered = true;
+        }
+        // [BOSS-AI] trigger boss at level 5
+        if (state.level === 5 && !state.bossActive) {
+          state.bossActive = true;
+          state.boss = spawnBoss();
+          // [VFX] announce boss with purple flash
+          state.vfx.flashAlpha = 0.8;
+          state.vfx.flashColor = '#a29bfe';
+          // Clear existing enemies for a clean fight
+          state.enemies = [];
+          state.enemyBullets = [];
+        }
+      }
+    }
+
+    // ===== SPAWN ENEMY WAVE =====
+    function spawnEnemyWave() {
+      // [BOSS-AI] stop normal spawning during boss fight
+      if (state.bossActive) return;
+      state.enemySpawnTimer++;
+      const interval = Math.max(30, 90 - state.level * 8);
+      if (state.enemySpawnTimer >= interval) {
+        // [GAMEPLAY-CHALLENGES] survival wave: only drones
+        if (state.survivalWaveActive) {
+          state.enemies.push(spawnEnemyForced('drone'));
+        } else {
+          state.enemies.push(spawnEnemy());
+        }
+        state.enemySpawnTimer = 0;
+      }
+    }
+
+    // [GAMEPLAY-CHALLENGES] forced enemy type (for survival wave)
+    function spawnEnemyForced(type) {
+      const lvl = state.level;
+      let w, h, hp, speed, color, pts;
+      if (type === 'drone') {
+        w = 28; h = 28; hp = 1; speed = 2.0 + lvl * 0.1; color = '#ff4757'; pts = 10;
+      } else if (type === 'cruiser') {
+        w = 42; h = 36; hp = 3; speed = 1.2 + lvl * 0.08; color = '#ffa502'; pts = 30;
+      } else {
+        w = 50; h = 44; hp = 5; speed = 0.7 + lvl * 0.06; color = '#eccc68'; pts = 60;
+      }
+      const enemy = {
+        x: 30 + Math.random() * (canvas.width - 60),
+        y: -60,
+        w, h, hp, speed, color, pts, type,
+        angle: 0,
+        shootTimer: 0,
+        shootInterval: 120 + Math.floor(Math.random() * 80),
+      };
+      if (type === 'cruiser') {
+        enemy.strafePhase = Math.random() * Math.PI * 2;
+        enemy.strafeSpeed = 1.5 + lvl * 0.15;
+        enemy.strafeAmplitude = 60 + Math.random() * 40;
+      }
+      return enemy;
+    }
+
+    // ===== RESET GAME =====
+    function resetGame() {
+      state.player = null;
+      state.bullets = [];
+      state.missiles = [];
+      state.enemyBullets = [];
+      state.enemies = [];
+      state.particles = [];
+      state.pickups = [];      // [GAMEPLAY-CHALLENGES]
+      state.score = 0;
+      state.lives = 3;
+      state.level = 1;
+      state.gameOver = false;
+      state.paused = false;
+      state.enemySpawnTimer = 0;
+      state.spawnTimer = 0;
+      state.spawnInterval = 90;
+      state.scoreToNextLevel = 500;
+      // [GAMEPLAY-CHALLENGES] reset combo
+      state.comboTimer = 0;
+      state.comboCount = 0;
+      // [GAMEPLAY-CHALLENGES] reset survival wave
+      state.survivalWaveActive = false;
+      state.survivalWaveTimer = 0;
+      state.survivalWaveTriggered = false;
+      // [BOSS-AI] reset boss
+      state.boss = null;
+      state.bossActive = false;
+      state.bossBullets = [];
+      // [GAMEPLAY-CHALLENGES] load high score
+      state.highScore = parseInt(localStorage.getItem('spaceBlasterHighScore')) || 0;
+      // [VFX] reset visual effects on restart
+      state.vfx.shake = 0;
+      state.vfx.shakeX = 0;
+      state.vfx.shakeY = 0;
+      state.vfx.flashAlpha = 0;
+      state.vfx.trail = [];
+      state.autoMode = false;
+      state.player = createPlayer();
+      initStars();
+      loop();
+    }
+
+    // [PHYSICS] movement, input, collision
+
+    // ===== KEYBOARD INPUT =====
+    const keys = {};
+    window.addEventListener('keydown', e => {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+        e.preventDefault(); // stop page scrolling
+      }
+      keys[e.code] = true;
+      if (e.code === 'KeyR' && state.gameOver) resetGame();
+      if (e.code === 'KeyP') state.paused = !state.paused;
+      if (e.code === 'KeyY' && !state.gameOver) state.autoMode = !state.autoMode;
+    });
+    window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+    // ===== CREATE PLAYER =====
+    function createPlayer() {
+      return {
+        x: canvas.width / 2,
+        y: canvas.height - 80,
+        w: 40,
+        h: 40,
+        speed: 5,
+        shootCooldown: 0,
+        shootRate: 15,
+        invincible: 0,
+        shieldActive: false,    // [GAMEPLAY-CHALLENGES] shield power-up
+        shieldFlash: 0,         // [GAMEPLAY-CHALLENGES] visual flash timer
+        // Dodge-roll
+        dodgeCooldown: 0,
+        dodgeTimer: 0,
+        // Missile cooldown
+        missileCooldown: 0,
+        missileRate: 60,
+      };
+    }
+
+    // ===== CREATE BULLET =====
+    function createBullet(x, y) {
+      return { x, y, w: 4, h: 12, vy: -10, color: '#00e5ff' };
+    }
+
+    // ===== CREATE HOMING MISSILE =====
+    function createMissile(x, y) {
+      return {
+        x, y,
+        vx: 0, vy: -6,
+        speed: 5.5,
+        turnRate: 0.12,
+        w: 6, h: 16,
+        life: 300,
+        color: '#ff6bff',
+        trail: [],
+      };
+    }
+
+    // ===== CREATE ENEMY BULLET =====
+    function createEnemyBullet(x, y) {
+      return { x, y, w: 6, h: 6, vy: 4, color: '#ff4757' };
+    }
+
+    // [BOSS-AI] boss spawn, movement, bullets, HUD
+
+    // ===== BOSS SPAWN =====
+    function spawnBoss() {
+      return {
+        x: canvas.width / 2, y: 120, w: 110, h: 85,
+        hp: 50, maxHp: 50, phase: 1,
+        speed: 1.5, dir: 1,
+        shootTimer: 0, shootRate: 55,
+        color: '#a29bfe', bullets: [],
+        name: 'THE VOID SOVEREIGN'
+      };
+    }
+
+    // ===== BOSS BULLET PATTERNS =====
+    function fanShot(boss, count, spread) {
+      count = count || 5;
+      spread = spread || Math.PI / 3;
+      const speed = 3;
+      for (let i = 0; i < count; i++) {
+        const angle = -Math.PI / 2 - spread / 2 + (spread / (Math.max(1, count - 1))) * i;
+        state.bossBullets.push({
+          x: boss.x, y: boss.y + boss.h / 2,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          w: 8, h: 8, color: '#a29bfe'
+        });
+      }
+    }
+
+    function spiralShot(boss, count) {
+      count = count || 8;
+      const speed = 2.5;
+      for (let i = 0; i < count; i++) {
+        const angle = (Math.PI * 2 / count) * i + (Date.now() * 0.003);
+        state.bossBullets.push({
+          x: boss.x, y: boss.y + boss.h / 2,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          w: 6, h: 6, color: '#ff6bff'
+        });
+      }
+    }
+
+    // ===== SPAWN ENEMY =====
+    function spawnEnemy() {
+      const lvl = state.level;
+      const roll = Math.random();
+
+      let type, w, h, hp, speed, color, pts;
+
+      // Higher levels weight toward harder types
+      let droneThreshold = 0.65 - lvl * 0.04;
+      let cruiserThreshold = droneThreshold + 0.25 + lvl * 0.02;
+      droneThreshold = Math.max(droneThreshold, 0.30);
+      cruiserThreshold = Math.min(cruiserThreshold, 0.95);
+
+      if (roll < droneThreshold) {
+        type = 'drone';
+        w = 28; h = 28; hp = 1; speed = 2.0 + lvl * 0.1; color = '#ff4757'; pts = 10;
+      } else if (roll < cruiserThreshold) {
+        type = 'cruiser';
+        w = 42; h = 36; hp = 3; speed = 1.2 + lvl * 0.08; color = '#ffa502'; pts = 30;
+      } else {
+        type = 'bomber';
+        w = 50; h = 44; hp = 5; speed = 0.7 + lvl * 0.06; color = '#eccc68'; pts = 60;
+      }
+
+      const enemy = {
+        x: 30 + Math.random() * (canvas.width - 60),
+        y: -60,
+        w, h, hp, speed, color, pts, type,
+        angle: 0,
+        // Shooting (from level 4)
+        shootTimer: 0,
+        shootInterval: 120 + Math.floor(Math.random() * 80),
+      };
+
+      // Cruiser strafe setup
+      if (type === 'cruiser') {
+        enemy.strafePhase = Math.random() * Math.PI * 2;
+        enemy.strafeSpeed = 1.5 + lvl * 0.15;
+        enemy.strafeAmplitude = 60 + Math.random() * 40;
+      }
+
+      return enemy;
+    }
+
+    // ===== CREATE SHIELD PICKUP =====
+    function createShieldPickup(x, y) {
+      return {
+        x, y,
+        vy: 1.2,
+        radius: 10,
+        pulse: 0,
+        life: 600, // 10 seconds at 60fps
+      };
+    }
+
+    // ===== PROCESS ENEMY DEATH (combo + shield drop) =====
+    function onEnemyKilled(enemy) {
+      // [GAMEPLAY-CHALLENGES] combo system
+      if (state.comboTimer > 0) {
+        state.comboCount++;
+      } else {
+        state.comboCount = 1;
+      }
+      state.comboTimer = 1.5; // 1.5 second window
+      const multiplier = Math.max(1, state.comboCount);
+      state.score += enemy.pts * multiplier;
+
+      // [GAMEPLAY-CHALLENGES] shield drop from bombers (15% chance)
+      if (enemy.type === 'bomber' && Math.random() < 0.15) {
+        state.pickups.push(createShieldPickup(enemy.x, enemy.y));
+      }
+
+      // [VFX] screen shake proportional to enemy size
+      const shakeAmount = enemy.type === 'drone' ? 0.08 : enemy.type === 'cruiser' ? 0.15 : 0.25;
+      state.vfx.shake = Math.min(1, state.vfx.shake + shakeAmount);
+    }
+
+    // ===== CHECK COLLISIONS (AABB) =====
+    function checkCollisions() {
+      // [BOSS-AI] Player bullets vs boss
+      if (state.bossActive && state.boss) {
+        const boss = state.boss;
+        for (let bi = state.bullets.length - 1; bi >= 0; bi--) {
+          const b = state.bullets[bi];
+          if (Math.abs(b.x - boss.x) < (b.w + boss.w) / 2 - 6 &&
+            Math.abs(b.y - boss.y) < (b.h + boss.h) / 2 - 6) {
+            boss.hp--;
+            state.bullets.splice(bi, 1);
+            explode(b.x, b.y, '#00e5ff', 6);
+            break;
+          }
+        }
+        // Homing missiles vs boss
+        for (let mi = state.missiles.length - 1; mi >= 0; mi--) {
+          const m = state.missiles[mi];
+          if (Math.abs(m.x - boss.x) < (m.w + boss.w) / 2 - 4 &&
+            Math.abs(m.y - boss.y) < (m.h + boss.h) / 2 - 4) {
+            boss.hp -= 2;
+            state.missiles.splice(mi, 1);
+            explode(m.x, m.y, '#ff6bff', 10);
+            break;
+          }
+        }
+      }
+
+      // Player bullets vs enemies
+      for (let bi = state.bullets.length - 1; bi >= 0; bi--) {
+        const b = state.bullets[bi];
+        for (let ei = state.enemies.length - 1; ei >= 0; ei--) {
+          const e = state.enemies[ei];
+          if (Math.abs(b.x - e.x) < (b.w + e.w) / 2 - 6 &&
+            Math.abs(b.y - e.y) < (b.h + e.h) / 2 - 6) {
+            // Hit!
+            e.hp--;
+            state.bullets.splice(bi, 1);
+            explode(b.x, b.y, '#00e5ff', 6);
+
+            if (e.hp <= 0) {
+              // Enemy destroyed
+              explode(e.x, e.y, e.color, 20);
+              onEnemyKilled(e);
+              state.enemies.splice(ei, 1);
+            }
+            break; // bullet is gone, stop checking this bullet
+          }
+        }
+      }
+
+      // Homing missiles vs enemies
+      for (let mi = state.missiles.length - 1; mi >= 0; mi--) {
+        const m = state.missiles[mi];
+        for (let ei = state.enemies.length - 1; ei >= 0; ei--) {
+          const e = state.enemies[ei];
+          if (Math.abs(m.x - e.x) < (m.w + e.w) / 2 - 4 &&
+            Math.abs(m.y - e.y) < (m.h + e.h) / 2 - 4) {
+            // Missile hits enemy — big explosion
+            e.hp -= 2;
+            state.missiles.splice(mi, 1);
+            explode(m.x, m.y, '#ff6bff', 10);
+
+            if (e.hp <= 0) {
+              explode(e.x, e.y, e.color, 30);
+              onEnemyKilled(e);
+              state.enemies.splice(ei, 1);
+            }
+            break;
+          }
+        }
+      }
+
+      // Enemy bullets vs player
+      if (state.player && state.player.invincible <= 0) {
+        for (let bi = state.enemyBullets.length - 1; bi >= 0; bi--) {
+          const b = state.enemyBullets[bi];
+          if (Math.abs(state.player.x - b.x) < (state.player.w + b.w) / 2 - 6 &&
+            Math.abs(state.player.y - b.y) < (state.player.h + b.h) / 2 - 6) {
+            // [GAMEPLAY-CHALLENGES] check for shield first
+            if (state.player.shieldActive) {
+              state.player.shieldActive = false;
+              explode(b.x, b.y, '#00ffff', 16);
+              // [VFX] small shake on shield hit
+              state.vfx.shake = Math.min(1, state.vfx.shake + 0.15);
+            } else {
+              state.lives--;
+              // [VFX] screen shake + red flash on hit
+              state.vfx.shake = Math.min(1, state.vfx.shake + 0.45);
+              state.vfx.flashAlpha = 0.5;
+              state.vfx.flashColor = '#ff0000';
+            }
+            explode(b.x, b.y, '#ff4757', 12);
+            state.enemyBullets.splice(bi, 1);
+            state.player.invincible = 90;
+            if (state.lives <= 0) {
+              state.gameOver = true;
+            }
+            break;
+          }
+        }
+      }
+
+      // [BOSS-AI] Boss bullets vs player
+      if (state.bossActive && state.boss && state.player && state.player.invincible <= 0) {
+        for (let bi = state.bossBullets.length - 1; bi >= 0; bi--) {
+          const b = state.bossBullets[bi];
+          if (Math.abs(state.player.x - b.x) < (state.player.w + b.w) / 2 - 6 &&
+            Math.abs(state.player.y - b.y) < (state.player.h + b.h) / 2 - 6) {
+            if (state.player.shieldActive) {
+              state.player.shieldActive = false;
+              explode(b.x, b.y, '#00ffff', 16);
+              state.vfx.shake = Math.min(1, state.vfx.shake + 0.15);
+            } else {
+              state.lives--;
+              state.vfx.shake = Math.min(1, state.vfx.shake + 0.45);
+              state.vfx.flashAlpha = 0.5;
+              state.vfx.flashColor = '#ff0000';
+            }
+            explode(b.x, b.y, '#a29bfe', 12);
+            state.bossBullets.splice(bi, 1);
+            state.player.invincible = 90;
+            if (state.lives <= 0) {
+              state.gameOver = true;
+            }
+            break;
+          }
+        }
+      }
+
+      // Enemies vs player
+      if (state.player && state.player.invincible <= 0) {
+        for (let ei = state.enemies.length - 1; ei >= 0; ei--) {
+          const e = state.enemies[ei];
+          if (Math.abs(state.player.x - e.x) < (state.player.w + e.w) / 2 - 6 &&
+            Math.abs(state.player.y - e.y) < (state.player.h + e.h) / 2 - 6) {
+            // [GAMEPLAY-CHALLENGES] check for shield first
+            if (state.player.shieldActive) {
+              state.player.shieldActive = false;
+              state.player.shieldFlash = 20;
+              explode(e.x, e.y, '#00ffff', 16);
+              // [VFX] small shake on shield hit
+              state.vfx.shake = Math.min(1, state.vfx.shake + 0.15);
+            } else {
+              state.lives--;
+              // [VFX] screen shake + red flash on hit
+              state.vfx.shake = Math.min(1, state.vfx.shake + 0.45);
+              state.vfx.flashAlpha = 0.5;
+              state.vfx.flashColor = '#ff0000';
+            }
+            explode(e.x, e.y, e.color, 20);
+            state.enemies.splice(ei, 1);
+            state.player.invincible = 90; // 1.5s invincibility at 60fps
+
+            if (state.lives <= 0) {
+              state.gameOver = true;
+            }
+            break;
+          }
+        }
+      }
+
+      // [GAMEPLAY-CHALLENGES] pickups vs player
+      if (state.player) {
+        for (let pi = state.pickups.length - 1; pi >= 0; pi--) {
+          const pu = state.pickups[pi];
+          const dx = state.player.x - pu.x;
+          const dy = state.player.y - pu.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < pu.radius + state.player.w / 2) {
+            state.player.shieldActive = true;
+            state.player.shieldFlash = 30;
+            explode(pu.x, pu.y, '#00ffff', 14);
+            state.pickups.splice(pi, 1);
+          }
+        }
+      }
+    }
+
+    // ===== FIND NEAREST ENEMY TO POSITION =====
+    function findNearestEnemy(x, y) {
+      let nearest = null;
+      let minDist = Infinity;
+      for (const e of state.enemies) {
+        const dx = e.x - x;
+        const dy = e.y - y;
+        const dist = dx * dx + dy * dy;
+        if (dist < minDist) {
+          minDist = dist;
+          nearest = e;
+        }
+      }
+      return nearest;
+    }
+
+    // ===== UPDATE PHYSICS =====
+    function updatePhysics() {
+      if (state.gameOver || state.paused) return;
+      if (!state.player) return;
+
+      const p = state.player;
+
+      // --- Dodge-roll on Shift ---
+      if (p.dodgeCooldown > 0) p.dodgeCooldown--;
+      if (p.dodgeTimer > 0) p.dodgeTimer--;
+
+      // Trigger dodge-roll
+      if (keys['ShiftLeft'] || keys['ShiftRight']) {
+        if (p.dodgeCooldown <= 0 && p.dodgeTimer <= 0) {
+          p.dodgeTimer = 10;           // 10 frames of roll
+          p.dodgeCooldown = 120;       // 2s cooldown at 60fps
+          p.invincible = 15;           // brief invincibility
+
+          // Dodge trail particles
+          for (let i = 0; i < 8; i++) {
+            state.particles.push({
+              x: p.x + (Math.random() - 0.5) * p.w,
+              y: p.y + (Math.random() - 0.5) * p.h,
+              vx: (Math.random() - 0.5) * 2,
+              vy: 1 + Math.random() * 2,
+              radius: 2 + Math.random() * 3,
+              life: 0.8,
+              decay: 0.04 + Math.random() * 0.02,
+              color: '#00e5ff'
+            });
+          }
+        }
+      }
+
+      // --- Move player (WASD / Arrow keys) ---
+      let moveSpeed = p.speed;
+      if (p.dodgeTimer > 0) moveSpeed = p.speed * 2.5; // burst speed during dodge
+
+      if (keys['KeyA'] || keys['ArrowLeft']) p.x -= moveSpeed;
+      if (keys['KeyD'] || keys['ArrowRight']) p.x += moveSpeed;
+      if (keys['KeyW'] || keys['ArrowUp']) p.y -= moveSpeed;
+      if (keys['KeyS'] || keys['ArrowDown']) p.y += moveSpeed;
+
+      // Clamp to canvas bounds
+      p.x = Math.max(p.w / 2, Math.min(canvas.width - p.w / 2, p.x));
+      p.y = Math.max(p.h / 2, Math.min(canvas.height - p.h / 2, p.y));
+
+      // [AUTO-MODE] auto-shoot, auto-missile, auto-dodge
+      if (state.autoMode) {
+        // Auto-shoot (as if Space held)
+        if (p.shootCooldown <= 0) {
+          state.bullets.push(createBullet(p.x, p.y - p.h / 2));
+          p.shootCooldown = p.shootRate;
+        }
+        // Auto-missile: fire when enemies exist and off cooldown
+        if (p.missileCooldown <= 0 && (state.enemies.length > 0 || (state.bossActive && state.boss))) {
+          state.missiles.push(createMissile(p.x - 10, p.y));
+          state.missiles.push(createMissile(p.x + 10, p.y));
+          p.missileCooldown = p.missileRate;
+        }
+        // Auto-dodge: trigger when an enemy or enemy bullet is within danger zone
+        if (p.dodgeCooldown <= 0 && p.dodgeTimer <= 0 && p.invincible <= 0) {
+          let danger = false;
+          for (const e of state.enemies) {
+            const dx = e.x - p.x, dy = e.y - p.y;
+            if (dx * dx + dy * dy < 200 * 200) { danger = true; break; }
+          }
+          if (!danger) {
+            for (const b of state.enemyBullets) {
+              const dx = b.x - p.x, dy = b.y - p.y;
+              if (dx * dx + dy * dy < 150 * 150) { danger = true; break; }
+            }
+          }
+          if (!danger && state.bossActive && state.boss) {
+            for (const b of state.bossBullets) {
+              const dx = b.x - p.x, dy = b.y - p.y;
+              if (dx * dx + dy * dy < 150 * 150) { danger = true; break; }
+            }
+          }
+          if (danger) {
+            p.dodgeTimer = 10;
+            p.dodgeCooldown = 120;
+            p.invincible = 15;
+            for (let i = 0; i < 8; i++) {
+              state.particles.push({
+                x: p.x + (Math.random() - 0.5) * p.w,
+                y: p.y + (Math.random() - 0.5) * p.h,
+                vx: (Math.random() - 0.5) * 2,
+                vy: 1 + Math.random() * 2,
+                radius: 2 + Math.random() * 3,
+                life: 0.8,
+                decay: 0.04 + Math.random() * 0.02,
+                color: '#00e5ff'
+              });
+            }
+          }
+        }
+      }
+
+      // --- Shooting (Space or Z) ---
+      if (p.shootCooldown > 0) p.shootCooldown--;
+      if ((keys['Space'] || keys['KeyZ']) && p.shootCooldown <= 0) {
+        state.bullets.push(createBullet(p.x, p.y - p.h / 2));
+        p.shootCooldown = p.shootRate;
+      }
+
+      // --- Homing missile on X key ---
+      if (p.missileCooldown > 0) p.missileCooldown--;
+      if (keys['KeyX'] && p.missileCooldown <= 0) {
+        state.missiles.push(createMissile(p.x - 10, p.y));
+        state.missiles.push(createMissile(p.x + 10, p.y));
+        p.missileCooldown = p.missileRate;
+      }
+
+      // --- Invincibility timer ---
+      if (p.invincible > 0) p.invincible--;
+
+      // --- Move bullets ---
+      for (let i = state.bullets.length - 1; i >= 0; i--) {
+        state.bullets[i].y += state.bullets[i].vy;
+        if (state.bullets[i].y < -20) {
+          state.bullets.splice(i, 1);
+        }
+      }
+
+      // --- Update homing missiles ---
+      for (let i = state.missiles.length - 1; i >= 0; i--) {
+        const m = state.missiles[i];
+        m.life--;
+
+        // Find target
+        let target = findNearestEnemy(m.x, m.y);
+        if (target) {
+          const dx = target.x - m.x;
+          const dy = target.y - m.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > 0) {
+            const desiredVx = (dx / dist) * m.speed;
+            const desiredVy = (dy / dist) * m.speed;
+            m.vx += (desiredVx - m.vx) * m.turnRate;
+            m.vy += (desiredVy - m.vy) * m.turnRate;
+          }
+        }
+
+        // Clamp speed
+        const spd = Math.sqrt(m.vx * m.vx + m.vy * m.vy);
+        if (spd > m.speed) {
+          m.vx = (m.vx / spd) * m.speed;
+          m.vy = (m.vy / spd) * m.speed;
+        }
+
+        m.x += m.vx;
+        m.y += m.vy;
+
+        // Trail particles
+        m.trail.push({ x: m.x, y: m.y + m.h / 2, life: 1.0 });
+        if (m.trail.length > 20) m.trail.shift();
+        for (let t = 0; t < m.trail.length; t++) {
+          m.trail[t].life -= 0.06;
+        }
+        m.trail = m.trail.filter(t => t.life > 0);
+
+        // Remove if off screen or expired
+        if (m.y < -30 || m.y > canvas.height + 30 || m.x < -30 || m.x > canvas.width + 30 || m.life <= 0) {
+          state.missiles.splice(i, 1);
+        }
+      }
+
+      // --- Move enemies ---
+      for (let i = state.enemies.length - 1; i >= 0; i--) {
+        const e = state.enemies[i];
+        e.y += e.speed;
+        e.angle += 0.04;
+
+        // Cruiser strafe side-to-side
+        if (e.type === 'cruiser') {
+          e.strafePhase += 0.03;
+          const strafeOffset = Math.sin(e.strafePhase) * e.strafeAmplitude;
+          e.x += Math.cos(e.strafePhase) * e.strafeSpeed;
+          // Clamp strafe to screen
+          e.x = Math.max(e.w / 2 + 10, Math.min(canvas.width - e.w / 2 - 10, e.x));
+        }
+
+        // Enemy shooting (from level 4)
+        if (state.level >= 4) {
+          e.shootTimer++;
+          if (e.shootTimer >= e.shootInterval) {
+            e.shootTimer = 0;
+            // Aim at player if alive
+            if (state.player) {
+              const dx = state.player.x - e.x;
+              const dy = state.player.y - e.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > 0) {
+                const bullet = createEnemyBullet(e.x, e.y + e.h / 2);
+                bullet.vx = (dx / dist) * bullet.vy;
+                bullet.vy = (dy / dist) * bullet.vy;
+                state.enemyBullets.push(bullet);
+              }
+            }
+          }
+        }
+
+        if (e.y > canvas.height + 60) {
+          state.enemies.splice(i, 1);
+        }
+      }
+
+      // --- Move enemy bullets ---
+      for (let i = state.enemyBullets.length - 1; i >= 0; i--) {
+        const b = state.enemyBullets[i];
+        b.x += b.vx || 0;
+        b.y += b.vy;
+        if (b.y > canvas.height + 20 || b.y < -20 || b.x < -20 || b.x > canvas.width + 20) {
+          state.enemyBullets.splice(i, 1);
+        }
+      }
+
+      // [BOSS-AI] Boss update — movement, phase, shooting
+      if (state.bossActive && state.boss) {
+        const boss = state.boss;
+
+        // Update phase based on HP thresholds
+        if (boss.hp <= Math.ceil(boss.maxHp * 0.2) && boss.phase < 3) {
+          boss.phase = 3;
+          boss.speed = 3.0;
+          boss.shootRate = 28;
+          explode(boss.x, boss.y, '#ff6bff', 40);
+          state.vfx.shake = Math.min(1, state.vfx.shake + 0.5);
+        } else if (boss.hp <= Math.ceil(boss.maxHp * 0.5) && boss.phase < 2) {
+          boss.phase = 2;
+          boss.speed = 2.0;
+          boss.shootRate = 40;
+          explode(boss.x, boss.y, '#a29bfe', 30);
+          state.vfx.shake = Math.min(1, state.vfx.shake + 0.3);
+          boss.chargeCooldown = 0;
+          boss.charging = false;
+        }
+
+        // -- Movement per phase --
+        if (boss.phase === 1) {
+          // Phase 1: left-right patrol, bounce off walls
+          boss.x += boss.speed * boss.dir;
+          if (boss.x + boss.w / 2 > canvas.width) {
+            boss.x = canvas.width - boss.w / 2;
+            boss.dir = -1;
+          } else if (boss.x - boss.w / 2 < 0) {
+            boss.x = boss.w / 2;
+            boss.dir = 1;
+          }
+        } else if (boss.phase === 2) {
+          // Phase 2: left-right + periodic downward charge
+          if (boss.chargeCooldown === undefined) boss.chargeCooldown = 0;
+          if (boss.charging === undefined) boss.charging = false;
+          if (boss.chargeTimer === undefined) boss.chargeTimer = 0;
+
+          if (boss.charging) {
+            boss.y += boss.speed * 2.5;
+            boss.chargeTimer--;
+            if (boss.chargeTimer <= 0) {
+              boss.charging = false;
+              boss.chargeCooldown = 120; // 2s cooldown
+            }
+          } else {
+            boss.x += boss.speed * boss.dir;
+            if (boss.x + boss.w / 2 > canvas.width) {
+              boss.x = canvas.width - boss.w / 2;
+              boss.dir = -1;
+            } else if (boss.x - boss.w / 2 < 0) {
+              boss.x = boss.w / 2;
+              boss.dir = 1;
+            }
+            if (boss.chargeCooldown > 0) boss.chargeCooldown--;
+            if (boss.chargeCooldown <= 0 && boss.y < 200) {
+              boss.charging = true;
+              boss.chargeTimer = 30;
+            }
+            // Drift back toward rest Y
+            if (boss.y > 120) boss.y -= 0.5;
+          }
+        } else if (boss.phase === 3) {
+          // Phase 3: erratic zigzag
+          boss.x += boss.speed * boss.dir;
+          boss.y += Math.sin(Date.now() * 0.005) * 1.5;
+          if (boss.x + boss.w / 2 > canvas.width) {
+            boss.x = canvas.width - boss.w / 2;
+            boss.dir = -1;
+          } else if (boss.x - boss.w / 2 < 0) {
+            boss.x = boss.w / 2;
+            boss.dir = 1;
+          }
+          boss.y = Math.max(40, Math.min(canvas.height / 2, boss.y));
+        }
+
+        // -- Shooting patterns --
+        boss.shootTimer++;
+        if (boss.shootTimer >= boss.shootRate) {
+          boss.shootTimer = 0;
+          if (boss.phase === 1) {
+            fanShot(boss, 5, Math.PI / 3);
+          } else if (boss.phase === 2) {
+            // Alternate fan / spiral
+            if (Math.floor(Date.now() / 1200) % 2 === 0) {
+              fanShot(boss, 6, Math.PI / 2);
+            } else {
+              spiralShot(boss, 8);
+            }
+          } else {
+            // Phase 3: both simultaneously at double rate
+            fanShot(boss, 7, Math.PI / 2);
+            spiralShot(boss, 8);
+          }
+        }
+
+        // -- Boss death --
+        if (boss.hp <= 0) {
+          explode(boss.x, boss.y, '#a29bfe', 50);
+          explode(boss.x, boss.y, '#ffffff', 20);
+          state.vfx.shake = Math.min(1, state.vfx.shake + 0.8);
+          state.vfx.flashAlpha = 0.6;
+          state.vfx.flashColor = '#a29bfe';
+          state.score += 2000;
+          state.bossActive = false;
+          state.boss = null;
+          // Advance to level 6 if not already past
+          if (state.level <= 5) {
+            state.level = 6;
+            state.vfx.flashAlpha = 0.6;
+            state.vfx.flashColor = '#ffffff';
+          }
+          state.bossBullets = [];
+        }
+      }
+
+      // [BOSS-AI] Move boss bullets
+      for (let i = state.bossBullets.length - 1; i >= 0; i--) {
+        const b = state.bossBullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+        if (b.y > canvas.height + 20 || b.y < -20 || b.x < -20 || b.x > canvas.width + 20) {
+          state.bossBullets.splice(i, 1);
+        }
+      }
+
+      // --- Scroll stars ---
+      for (const star of state.stars) {
+        star.y += star.speed;
+        if (star.y > canvas.height + 5) {
+          star.y = -5;
+          star.x = Math.random() * canvas.width;
+        }
+      }
+
+      // --- Update particles ---
+      state.particles = state.particles.filter(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= p.decay;
+        return p.life > 0;
+      });
+
+      // [GAMEPLAY-CHALLENGES] --- Update pickups ---
+      for (let i = state.pickups.length - 1; i >= 0; i--) {
+        const pu = state.pickups[i];
+        pu.y += pu.vy;
+        pu.pulse += 0.08;
+        pu.life--;
+        if (pu.life <= 0 || pu.y > canvas.height + 20) {
+          state.pickups.splice(i, 1);
+        }
+      }
+
+      // [GAMEPLAY-CHALLENGES] --- Decrement combo timer ---
+      if (state.comboTimer > 0) {
+        state.comboTimer -= 1 / 60; // dt in seconds (60fps)
+        if (state.comboTimer <= 0) {
+          state.comboTimer = 0;
+          state.comboCount = 0;
+        }
+      }
+
+      // [GAMEPLAY-CHALLENGES] --- Survival wave timer ---
+      if (state.survivalWaveActive) {
+        state.survivalWaveTimer -= 1 / 60;
+        if (state.survivalWaveTimer <= 0) {
+          state.survivalWaveActive = false;
+          state.survivalWaveTimer = 0;
+        }
+      }
+
+      // [GAMEPLAY-CHALLENGES] --- Shield flash decay ---
+      if (state.player && state.player.shieldFlash > 0) {
+        state.player.shieldFlash--;
+      }
+
+      // --- Collisions ---
+      checkCollisions();
+    }
+
+    // [VFX] screen shake, flash, vignette, trail, nebula
+
+    // Nebula blobs (animated background)
+    let nebulaBlobs = [];
+
+    function initNebula() {
+      nebulaBlobs = [
+        { x: 200, y: 200, vx: -0.12, vy: -0.08, radius: 200, r: 138, g: 43, b: 226 },
+        { x: 500, y: 400, vx: 0.08, vy: -0.15, radius: 180, r: 75, g: 0, b: 130 },
+        { x: 350, y: 100, vx: -0.06, vy: 0.12, radius: 160, r: 147, g: 112, b: 219 }
+      ];
+    }
+
+    function drawNebula() {
+      if (!nebulaBlobs.length) return;
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      for (const blob of nebulaBlobs) {
+        const gradient = ctx.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, blob.radius);
+        gradient.addColorStop(0, `rgba(${blob.r},${blob.g},${blob.b},0.25)`);
+        gradient.addColorStop(0.5, `rgba(${blob.r},${blob.g},${blob.b},0.1)`);
+        gradient.addColorStop(1, `rgba(${blob.r},${blob.g},${blob.b},0)`);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(blob.x - blob.radius, blob.y - blob.radius, blob.radius * 2, blob.radius * 2);
+      }
+      ctx.restore();
+    }
+
+    function updateNebula() {
+      for (const blob of nebulaBlobs) {
+        blob.x += blob.vx;
+        blob.y += blob.vy;
+        // Wrap around screen edges
+        if (blob.x < -blob.radius) blob.x = canvas.width + blob.radius;
+        if (blob.x > canvas.width + blob.radius) blob.x = -blob.radius;
+        if (blob.y < -blob.radius) blob.y = canvas.height + blob.radius;
+        if (blob.y > canvas.height + blob.radius) blob.y = -blob.radius;
+      }
+    }
+
+    function updateVFX() {
+      const v = state.vfx;
+      // Decay screen shake (trauma model)
+      if (v.shake > 0) {
+        v.shakeX = (Math.random() * 2 - 1) * v.shake * v.shake * 16;
+        v.shakeY = (Math.random() * 2 - 1) * v.shake * v.shake * 16;
+        v.shake = Math.max(0, v.shake - 0.018);
+      } else {
+        v.shakeX = 0;
+        v.shakeY = 0;
+      }
+      // Decay flash
+      if (v.flashAlpha > 0) {
+        v.flashAlpha = Math.max(0, v.flashAlpha - 0.03);
+      }
+      // Player motion trail — keep last 6 positions
+      if (state.player) {
+        v.trail.push({ x: state.player.x, y: state.player.y });
+        if (v.trail.length > 6) v.trail.shift();
+      }
+      // Nebula drift
+      updateNebula();
+    }
+
+    function drawTrail() {
+      const trail = state.vfx.trail;
+      if (!state.player || trail.length < 2) return;
+      for (let i = 0; i < trail.length; i++) {
+        const t = trail[i];
+        const alpha = 0.05 + (i / (trail.length - 1)) * 0.2;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        // Ghost ship silhouette
+        ctx.beginPath();
+        ctx.moveTo(t.x, t.y - 20);
+        ctx.lineTo(t.x - 14, t.y + 14);
+        ctx.lineTo(t.x + 14, t.y + 14);
+        ctx.closePath();
+        ctx.fillStyle = '#00e5ff';
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = '#00e5ff';
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawDamageVignette() {
+      ctx.save();
+      const gradient = ctx.createRadialGradient(
+        canvas.width / 2, canvas.height / 2, canvas.height * 0.2,
+        canvas.width / 2, canvas.height / 2, canvas.height * 0.7
+      );
+      gradient.addColorStop(0, 'rgba(0,0,0,0)');
+      gradient.addColorStop(0.5, 'rgba(0,0,0,0)');
+      gradient.addColorStop(0.7, 'rgba(255,0,0,0.2)');
+      gradient.addColorStop(1, 'rgba(255,0,0,0.5)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    function drawFlashOverlay() {
+      if (state.vfx.flashAlpha <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = state.vfx.flashAlpha;
+      ctx.fillStyle = state.vfx.flashColor;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    // ===== DRAWING FUNCTIONS =====
+
+    function drawStars() {
+      for (const star of state.stars) {
+        ctx.beginPath();
+        ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${star.brightness})`;
+        ctx.fill();
+      }
+    }
+
+    function drawPlayer() {
+      const p = state.player;
+      if (p === null) return;
+
+      // Blink when invincible
+      if (p.invincible > 0 && Math.floor(p.invincible / 4) % 2 === 0) return;
+
+      ctx.save();
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = p.dodgeTimer > 0 ? '#ffffff' : '#00e5ff';
+
+      // Main fuselage triangle
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - p.h / 2);
+      ctx.lineTo(p.x - p.w / 2, p.y + p.h / 2);
+      ctx.lineTo(p.x + p.w / 2, p.y + p.h / 2);
+      ctx.closePath();
+      ctx.fillStyle = p.dodgeTimer > 0 ? '#ffffff' : '#00e5ff';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Left wing
+      ctx.beginPath();
+      ctx.moveTo(p.x - p.w / 2, p.y + p.h / 2);
+      ctx.lineTo(p.x - p.w / 2 - 12, p.y + p.h / 2 + 8);
+      ctx.lineTo(p.x - p.w / 4, p.y + p.h / 4);
+      ctx.closePath();
+      ctx.fillStyle = '#00b8d4';
+      ctx.fill();
+
+      // Right wing
+      ctx.beginPath();
+      ctx.moveTo(p.x + p.w / 2, p.y + p.h / 2);
+      ctx.lineTo(p.x + p.w / 2 + 12, p.y + p.h / 2 + 8);
+      ctx.lineTo(p.x + p.w / 4, p.y + p.h / 4);
+      ctx.closePath();
+      ctx.fillStyle = '#00b8d4';
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+
+      // Engine glow
+      ctx.save();
+      ctx.shadowBlur = 22;
+      ctx.shadowColor = '#ff6b35';
+      const flicker = 8 + Math.random() * 6;
+      ctx.beginPath();
+      ctx.moveTo(p.x - 8, p.y + p.h / 2);
+      ctx.lineTo(p.x, p.y + p.h / 2 + flicker);
+      ctx.lineTo(p.x + 8, p.y + p.h / 2);
+      ctx.closePath();
+      ctx.fillStyle = '#ff6b35';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(p.x - 14, p.y + p.h / 2 + 2);
+      ctx.lineTo(p.x - 14, p.y + p.h / 2 + flicker * 0.6);
+      ctx.lineTo(p.x - 10, p.y + p.h / 2 + 2);
+      ctx.closePath();
+      ctx.fillStyle = '#ff8a50';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(p.x + 10, p.y + p.h / 2 + 2);
+      ctx.lineTo(p.x + 14, p.y + p.h / 2 + flicker * 0.6);
+      ctx.lineTo(p.x + 14, p.y + p.h / 2 + 2);
+      ctx.closePath();
+      ctx.fillStyle = '#ff8a50';
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+      ctx.restore();
+
+      // [GAMEPLAY-CHALLENGES] Shield bubble visual
+      if (p.shieldActive) {
+        ctx.save();
+        const shieldAlpha = p.shieldFlash > 0 ? 0.5 + Math.sin(p.shieldFlash * 0.5) * 0.3 : 0.25;
+        ctx.strokeStyle = `rgba(0, 255, 255, ${shieldAlpha})`;
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#00ffff';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.w / 2 + 8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Dodge cooldown indicator (small ring)
+      if (p.dodgeCooldown > 0) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0, 229, 255, 0.3)';
+        ctx.lineWidth = 2;
+        const progress = 1 - p.dodgeCooldown / 120;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y + p.h / 2 + 16, 8, 0, Math.PI * 2 * progress);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function drawDrone(enemy) {
+      ctx.save();
+      ctx.shadowBlur = 14;
+      ctx.shadowColor = '#ff4757';
+      ctx.translate(enemy.x, enemy.y);
+      ctx.rotate(enemy.angle);
+
+      const s = enemy.w / 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -s);
+      ctx.lineTo(s, 0);
+      ctx.lineTo(0, s);
+      ctx.lineTo(-s, 0);
+      ctx.closePath();
+      ctx.fillStyle = '#ff4757';
+      ctx.fill();
+      ctx.strokeStyle = '#ff6b81';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, -s * 0.5);
+      ctx.lineTo(s * 0.5, 0);
+      ctx.lineTo(0, s * 0.5);
+      ctx.lineTo(-s * 0.5, 0);
+      ctx.closePath();
+      ctx.fillStyle = '#ff6b81';
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    function drawCruiser(enemy) {
+      ctx.save();
+      ctx.shadowBlur = 14;
+      ctx.shadowColor = '#ffa502';
+
+      const w = enemy.w / 2;
+      const h = enemy.h / 2;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x, enemy.y + h);
+      ctx.lineTo(enemy.x - w, enemy.y - h * 0.5);
+      ctx.lineTo(enemy.x - w * 0.3, enemy.y - h * 0.3);
+      ctx.lineTo(enemy.x, enemy.y - h);
+      ctx.lineTo(enemy.x + w * 0.3, enemy.y - h * 0.3);
+      ctx.lineTo(enemy.x + w, enemy.y - h * 0.5);
+      ctx.closePath();
+      ctx.fillStyle = '#ffa502';
+      ctx.fill();
+      ctx.strokeStyle = '#ffb84d';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    function drawBomber(enemy) {
+      ctx.save();
+      ctx.shadowBlur = 14;
+      ctx.shadowColor = '#eccc68';
+
+      const w = enemy.w / 2;
+      const h = enemy.h / 2;
+      const topW = w * 0.6;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - topW, enemy.y - h);
+      ctx.lineTo(enemy.x + topW, enemy.y - h);
+      ctx.lineTo(enemy.x + w, enemy.y + h * 0.6);
+      ctx.lineTo(enemy.x - w, enemy.y + h * 0.6);
+      ctx.closePath();
+      ctx.fillStyle = '#eccc68';
+      ctx.fill();
+      ctx.strokeStyle = '#f0e68c';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    // [BOSS-AI] Draw boss
+    function drawBoss() {
+      if (!state.bossActive || !state.boss) return;
+      const boss = state.boss;
+
+      ctx.save();
+      ctx.translate(boss.x, boss.y);
+
+      // Glow
+      ctx.shadowBlur = 30;
+      ctx.shadowColor = boss.color;
+
+      const w = boss.w / 2;
+      const h = boss.h / 2;
+
+      // Core body — angular dreadnought silhouette
+      ctx.beginPath();
+      ctx.moveTo(0, -h);
+      ctx.lineTo(-w * 0.8, -h * 0.2);
+      ctx.lineTo(-w, h * 0.3);
+      ctx.lineTo(-w * 0.6, h);
+      ctx.lineTo(w * 0.6, h);
+      ctx.lineTo(w, h * 0.3);
+      ctx.lineTo(w * 0.8, -h * 0.2);
+      ctx.closePath();
+      ctx.fillStyle = boss.color;
+      ctx.fill();
+      ctx.strokeStyle = '#dfe6e9';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Inner armour plate
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.5);
+      ctx.lineTo(-w * 0.4, 0);
+      ctx.lineTo(0, h * 0.4);
+      ctx.lineTo(w * 0.4, 0);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(223, 230, 233, 0.2)';
+      ctx.fill();
+
+      // Core eye — colour shifts with phase
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(0, 0, w * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = boss.phase === 3 ? '#ff4757' : boss.phase === 2 ? '#ffa502' : '#ffffff';
+      ctx.fill();
+
+      // Phase spikes
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = boss.color;
+      const spikeCount = boss.phase === 3 ? 8 : boss.phase === 2 ? 6 : 4;
+      for (let i = 0; i < spikeCount; i++) {
+        const angle = (Math.PI * 2 / spikeCount) * i + Date.now() * 0.002 * (boss.phase === 3 ? 2 : 1);
+        const len = w * (boss.phase === 3 ? 1.3 : boss.phase === 2 ? 1.15 : 1);
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(angle) * w * 0.5, Math.sin(angle) * w * 0.5);
+        ctx.lineTo(Math.cos(angle) * len, Math.sin(angle) * len);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(162, 155, 254, 0.6)';
+        ctx.stroke();
+      }
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    function drawEnemies() {
+      for (const enemy of state.enemies) {
+        switch (enemy.type) {
+          case 'drone': drawDrone(enemy); break;
+          case 'cruiser': drawCruiser(enemy); break;
+          case 'bomber': drawBomber(enemy); break;
+        }
+      }
+    }
+
+    function drawBullets() {
+      ctx.save();
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = '#00e5ff';
+      for (const bullet of state.bullets) {
+        ctx.fillStyle = '#00e5ff';
+        ctx.fillRect(bullet.x - bullet.w / 2, bullet.y - bullet.h / 2, bullet.w, bullet.h);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(bullet.x - 1, bullet.y - bullet.h / 2 + 2, 2, bullet.h - 4);
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    function drawMissiles() {
+      for (const m of state.missiles) {
+        // Trail
+        ctx.save();
+        for (const t of m.trail) {
+          ctx.globalAlpha = t.life * 0.7;
+          ctx.fillStyle = '#ff6bff';
+          ctx.beginPath();
+          ctx.arc(t.x, t.y, 2 * t.life, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // Missile body
+        ctx.save();
+        const angle = Math.atan2(m.vy, m.vx) - Math.PI / 2;
+        ctx.translate(m.x, m.y);
+        ctx.rotate(angle);
+
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = '#ff6bff';
+        ctx.fillStyle = '#ff6bff';
+        ctx.fillRect(-m.w / 2, -m.h / 2, m.w, m.h);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(-1, -m.h / 2 + 2, 2, m.h - 4);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+    }
+
+    function drawEnemyBullets() {
+      ctx.save();
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = '#ff4757';
+      for (const b of state.enemyBullets) {
+        ctx.fillStyle = '#ff4757';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ff8a8a';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.w / 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    // [BOSS-AI] Draw boss bullets
+    function drawBossBullets() {
+      ctx.save();
+      for (const b of state.bossBullets) {
+        ctx.shadowBlur = 14;
+        ctx.shadowColor = b.color || '#a29bfe';
+        ctx.fillStyle = b.color || '#a29bfe';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.w / 2, 0, Math.PI * 2);
+        ctx.fill();
+        // Bright inner core
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.w / 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    // [GAMEPLAY-CHALLENGES] ===== DRAW PICKUPS =====
+    function drawPickups() {
+      for (const pu of state.pickups) {
+        ctx.save();
+        const pulseScale = 1 + Math.sin(pu.pulse) * 0.2;
+        const r = pu.radius * pulseScale;
+
+        // Outer glow
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#00ffff';
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.arc(pu.x, pu.y, r + 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#00ffff';
+        ctx.fill();
+
+        // Main shield circle
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        ctx.arc(pu.x, pu.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#00e5ff';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Shield icon (S)
+        ctx.globalAlpha = 1.0;
+        ctx.shadowBlur = 0;
+        ctx.font = 'bold 12px "Courier New", monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('S', pu.x, pu.y);
+
+        ctx.restore();
+      }
+    }
+
+    function drawParticles() {
+      for (const particle of state.particles) {
+        ctx.save();
+        ctx.globalAlpha = particle.life;
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = particle.color || '#ff6b35';
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.radius * particle.life, 0, Math.PI * 2);
+        ctx.fillStyle = particle.color || '#ff6b35';
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+    }
+
+    function drawHUD() {
+      ctx.save();
+
+      // [BOSS-AI] Boss health bar
+      if (state.bossActive && state.boss) {
+        const boss = state.boss;
+        const barWidth = 420;
+        const barHeight = 22;
+        const barX = (canvas.width - barWidth) / 2;
+        const barY = 6;
+        const hpRatio = Math.max(0, boss.hp / boss.maxHp);
+
+        // Dark background with border
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        ctx.fillRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4);
+        ctx.strokeStyle = '#636e72';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX - 2, barY - 2, barWidth + 4, barHeight + 4);
+
+        // Health fill — colour shifts as HP drops
+        const fillColor = hpRatio > 0.5 ? '#a29bfe' : hpRatio > 0.25 ? '#ffa502' : '#ff4757';
+        ctx.shadowBlur = 14;
+        ctx.shadowColor = fillColor;
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
+        ctx.shadowBlur = 0;
+
+        // HP segment ticks
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+        ctx.lineWidth = 1;
+        for (let i = 1; i < 10; i++) {
+          const sx = barX + (barWidth / 10) * i;
+          ctx.beginPath();
+          ctx.moveTo(sx, barY);
+          ctx.lineTo(sx, barY + barHeight);
+          ctx.stroke();
+        }
+
+        // Border on top
+        ctx.strokeStyle = '#dfe6e9';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barWidth, barHeight);
+
+        // Label with name + phase
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = boss.color;
+        ctx.font = 'bold 13px "Courier New", monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${boss.name}  —  PHASE ${boss.phase}  —  ${boss.hp}/${boss.maxHp}`, canvas.width / 2, barY + barHeight + 16);
+        ctx.shadowBlur = 0;
+      }
+
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = '#00e5ff';
+      ctx.font = '18px "Courier New", monospace';
+      ctx.fillStyle = '#00e5ff';
+      ctx.textAlign = 'left';
+
+      ctx.fillText(`SCORE: ${state.score}`, 20, 32);
+      ctx.fillText(`LEVEL: ${state.level}`, 20, 58);
+
+      // [GAMEPLAY-CHALLENGES] high score
+      ctx.font = '14px "Courier New", monospace';
+      ctx.fillStyle = '#ffd700';
+      ctx.shadowColor = '#ffd700';
+      ctx.fillText(`HIGH SCORE: ${state.highScore}`, 20, 80);
+
+      // [GAMEPLAY-CHALLENGES] combo display
+      if (state.comboCount > 1) {
+        ctx.textAlign = 'left';
+        ctx.font = 'bold 20px "Courier New", monospace';
+        ctx.fillStyle = '#ffeb3b';
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = '#ffeb3b';
+        ctx.fillText(`x${state.comboCount} COMBO!`, 20, 105);
+      }
+
+      ctx.textAlign = 'right';
+      let ships = '';
+      for (let i = 0; i < state.lives; i++) ships += '\u2666';
+      ctx.font = '18px "Courier New", monospace';
+      ctx.fillStyle = '#00e5ff';
+      ctx.shadowColor = '#00e5ff';
+      ctx.shadowBlur = 8;
+      ctx.fillText(`SHIPS: ${ships}`, canvas.width - 20, 32);
+
+      // [GAMEPLAY-CHALLENGES] shield indicator
+      if (state.player && state.player.shieldActive) {
+        ctx.textAlign = 'right';
+        ctx.font = '14px "Courier New", monospace';
+        ctx.fillStyle = '#00ffff';
+        ctx.shadowColor = '#00ffff';
+        ctx.shadowBlur = 10;
+        ctx.fillText('[SHIELD ACTIVE]', canvas.width - 20, 58);
+      }
+
+      // Missile cooldown indicator
+      if (state.player) {
+        const p = state.player;
+        const mcd = p.missileCooldown > 0 ? p.missileCooldown : 0;
+        const mReady = mcd <= 0;
+        ctx.fillStyle = mReady ? '#ff6bff' : '#555';
+        ctx.font = '14px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = mReady ? '#ff6bff' : '#555';
+        ctx.shadowBlur = 4;
+        ctx.fillText(mReady ? '[X] MISSILE READY' : `[X] MISSILE ${Math.ceil(mcd / 60 * 10) / 10}s`, canvas.width / 2, canvas.height - 15);
+
+        // Dodge cooldown
+        const dcd = p.dodgeCooldown > 0 ? p.dodgeCooldown : 0;
+        const dReady = dcd <= 0;
+        ctx.fillStyle = dReady ? '#00e5ff' : '#555';
+        ctx.fillText(dReady ? '[SHIFT] DODGE READY' : `[SHIFT] DODGE ${Math.ceil(dcd / 60 * 10) / 10}s`, canvas.width / 2, canvas.height - 35);
+      }
+
+      // [GAMEPLAY-CHALLENGES] survival wave display
+      if (state.survivalWaveActive) {
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 24px "Courier New", monospace';
+        ctx.fillStyle = '#ff4757';
+        ctx.shadowBlur = 16;
+        ctx.shadowColor = '#ff4757';
+        ctx.fillText(`SURVIVAL WAVE — ${Math.ceil(state.survivalWaveTimer)}s`, canvas.width / 2, canvas.height / 2 - 60);
+      }
+
+      // Auto-mode indicator
+      if (state.autoMode) {
+        ctx.textAlign = 'left';
+        ctx.font = '14px "Courier New", monospace';
+        ctx.fillStyle = '#ff6bff';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#ff6bff';
+        ctx.fillText('[AUTO] Y', 20, canvas.height - 15);
+      }
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    function drawGameOverOverlay() {
+      // [GAMEPLAY-CHALLENGES] save high score to localStorage
+      if (state.score > state.highScore) {
+        state.highScore = state.score;
+        localStorage.setItem('spaceBlasterHighScore', state.highScore.toString());
+      }
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.fillRect(canvas.width / 2 - 220, canvas.height / 2 - 100, 440, 200);
+
+      ctx.strokeStyle = '#ff4757';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(canvas.width / 2 - 220, canvas.height / 2 - 100, 440, 200);
+
+      ctx.textAlign = 'center';
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ff4757';
+
+      ctx.font = 'bold 42px "Courier New", monospace';
+      ctx.fillStyle = '#ff4757';
+      ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 40);
+
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = '#00e5ff';
+      ctx.font = '22px "Courier New", monospace';
+      ctx.fillStyle = '#00e5ff';
+      ctx.fillText(`SCORE: ${state.score}`, canvas.width / 2, canvas.height / 2);
+
+      // [GAMEPLAY-CHALLENGES] high score on game-over
+      ctx.shadowColor = '#ffd700';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText(`HIGH SCORE: ${state.highScore}`, canvas.width / 2, canvas.height / 2 + 30);
+
+      // [GAMEPLAY-CHALLENGES] new high score indicator
+      if (state.score >= state.highScore && state.score > 0) {
+        ctx.fillStyle = '#ffeb3b';
+        ctx.font = 'bold 16px "Courier New", monospace';
+        ctx.fillText('★ NEW HIGH SCORE! ★', canvas.width / 2, canvas.height / 2 + 55);
+      }
+
+      ctx.font = '16px "Courier New", monospace';
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowBlur = 0;
+      ctx.fillText('Press R to restart', canvas.width / 2, canvas.height / 2 + 85);
+
+      ctx.restore();
+    }
+
+    function drawPausedOverlay() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.textAlign = 'center';
+      ctx.shadowBlur = 24;
+      ctx.shadowColor = '#00e5ff';
+      ctx.font = 'bold 48px "Courier New", monospace';
+      ctx.fillStyle = '#00e5ff';
+      ctx.fillText('PAUSED', canvas.width / 2, canvas.height / 2);
+
+      ctx.font = '16px "Courier New", monospace';
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowBlur = 0;
+      ctx.fillText('Press P to resume', canvas.width / 2, canvas.height / 2 + 40);
+
+      ctx.restore();
+    }
+
+    // ===== MAIN DRAW =====
+    function draw() {
+      ctx.fillStyle = '#03060f';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // --- Screen shake transform ---
+      ctx.save();
+      if (state.vfx.shake > 0) {
+        ctx.translate(state.vfx.shakeX, state.vfx.shakeY);
+      }
+
+      // Nebula drifts behind everything
+      drawNebula();
+
+      drawStars();
+
+      // Player motion trail behind game objects
+      drawTrail();
+
+      drawEnemies();
+      drawBoss();          // [BOSS-AI]
+      drawBullets();
+      drawMissiles();
+      drawEnemyBullets();
+      drawBossBullets();   // [BOSS-AI]
+      drawPickups();          // [GAMEPLAY-CHALLENGES]
+      drawParticles();
+      drawPlayer();
+
+      ctx.restore(); // End shake transform
+
+      // Screen-space overlays (no shake)
+      drawHUD();
+
+      // Damage vignette when lives are critical
+      if (state.lives <= 1) {
+        drawDamageVignette();
+      }
+
+      // Flash overlay (hit flash / level-up flash)
+      drawFlashOverlay();
+
+      if (state.gameOver) {
+        drawGameOverOverlay();
+      }
+      if (state.paused) {
+        drawPausedOverlay();
+      }
+    }
+
+    // ===== GAME LOOP =====
+    function loop() {
+      updateVFX();
+      if (!state.gameOver && !state.paused) {
+        updatePhysics();
+        spawnEnemyWave();
+        state.particles = state.particles.filter(p => {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.life -= p.decay;
+          return p.life > 0;
+        });
+        checkLevelUp();
+      }
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // ===== START =====
+    state.highScore = parseInt(localStorage.getItem('spaceBlasterHighScore')) || 0;
+    state.player = createPlayer();
+    initStars();
+    initNebula();
+    loop();
   </script>
+
+  <div class="doc">
+    <p>秘笈：按Y自动射击</p>
+
+    <h1>Space Blaster — Agentic Game Development Workshop</h1>
+
+    <blockquote>
+      <p>Watch specialized AI agents build a space-shooter from scratch — live, on your local GPU. No cloud. No API keys.</p>
+    </blockquote>
+
+    <p><strong>Authors:</strong> Krishna Sivakumar and Xun Wang</p>
+    <p><a href="https://github.com/iswaryaalex/space-battle-agentic-game-dev">Source</a></p>
+    <hr />
+
+    <h2>What You'll Learn Today</h2>
+
+    <p>By the end of this workshop you will have:</p>
+    <ul>
+      <li><strong>Agentic AI workflows</strong> — how to break a complex task into specialized sub-agents that each own a layer of the codebase</li>
+      <li><strong>Game architecture</strong> — how a canvas renderer, physics engine, and gameplay state machine fit together in a single HTML file</li>
+      <li><strong>On-device inference</strong> — running a 35B-parameter model locally on AMD Ryzen AI hardware with Lemonade Server + ROCm</li>
+      <li><strong>OpenCode TUI</strong> — navigating Build Mode, switching agents, and iterating on code through natural-language prompts</li>
+      <li><strong>Prompt engineering for code agents</strong> — giving short, effective instructions that produce working features in one shot</li>
+    </ul>
+    <p>And you'll walk away with a fully playable space shooter you built (mostly) by typing English.</p>
+
+    <hr />
+
+    <h2>How this workshop works</h2>
+
+    <p>You start with a single nearly-empty <code>game.html</code>. Three pre-written AI sub-agents build it step by step using <strong>OpenCode</strong> connected to <strong>Lemonade Server</strong> running locally on <strong>AMD Ryzen AI Max 395 (Strix Halo)</strong>.</p>
+
+    <p>Once the base game is running, you take over and push the agents further with new feature challenges.</p>
+
+    <hr />
+
+    <h2>Project structure</h2>
+
+    <pre><code>space-blaster-workshop/
+├── game.html                  ← the one file everything gets built into
+├── README.md
+├── config.toml
+└── .opencode/
+    ├── config.toml
+    └── agents/
+        ├── ui-renderer.md         Agent 1 — canvas, draw loop, HUD, particles
+        ├── physics-movement.md    Agent 2 — input, movement, collision
+        ├── gameplay-rules.md      Agent 3 — state, score, levels, game-over
+        ├── vfx-polish.md          Agent 4 (optional) — screen shake, trails
+        └── boss-ai.md             Agent 5 (optional) — boss fights</code></pre>
+
+    <hr />
+
+    <h2>Workshop flow</h2>
+
+    <p>Navigate to the project folder:</p>
+
+    <pre><code>cd space-blaster-workshop</code></pre>
+
+    <h3>Step 1 — Launch OpenCode with Lemonade</h3>
+
+    <p>From inside the project folder:</p>
+
+    <pre><code>lemonade launch opencode</code></pre>
+
+    <p>Lemonade starts the inference server and launches OpenCode in one command. You will be prompted to select a model recipe:</p>
+
+    <pre><code>Select a recipe to import and use with Opencode:
+  0) Browse downloaded models
+  1) GLM-4.7-Flash-GGUF-NoThinking.json
+  2) GLM-4.7-Flash-GGUF-ThinkingCoder.json
+  3) Gemma-4-26B-A4B-NoThinking.json
+  4) Gemma-4-26B-A4B-ThinkingCoder.json
+  5) Qwen3.5-35B-A3B-NoThinking.json
+  6) Qwen3.5-35B-A3B-ThinkingCoder.json
+  7) Qwen3.6-35B-A3B-NoThinking.json
+  8) Qwen3.6-35B-A3B-ThinkingCoder.json</code></pre>
+
+    <p><strong>Select option 8 — <code>Qwen3.6-35B-A3B-ThinkingCoder</code></strong></p>
+
+    <p>Option 7 (NoThinking) is faster. Option 8 reasons through the code more carefully — recommended for the best results during the workshop.</p>
+
+    <h3>Step 2 — Confirm agents are loaded</h3>
+
+    <p>Inside OpenCode, type:</p>
+
+    <pre><code>/agents</code></pre>
+
+    <p>You should see:</p>
+
+    <pre><code>ui-renderer
+physics-movement
+gameplay-rules
+vfx-polish      (optional)
+boss-ai         (optional)</code></pre>
+
+    <p>You are all set. Press Esc to start building the game.</p>
+
+    <hr />
+
+    <h2>Build the game — invoke agents in order</h2>
+
+    <p><strong>Important:</strong> You must be in Build Mode to invoke agents. When OpenCode launches you'll be in Chat Mode by default. Press <strong>Tab</strong> to cycle through modes until you see <strong>Build</strong> in the bottom status bar. Build Mode allows agents to write and edit files — Chat Mode will only talk about code without changing anything.</p>
+
+    <h3>Step 3 — Visual layer</h3>
+
+    <p>While in Build Mode, select the <code>ui-renderer</code> agent by typing <code>@ui-renderer</code> and giving it the prompt:</p>
+
+    <pre><code>@ui-renderer build the visual foundation of the game</code></pre>
+
+    <p>This may take 2-3 minutes while the model generates code. Sit back and watch the agent work!</p>
+
+    <p>→ Canvas, star-field, ship art, enemy shapes, HUD, and draw loop written into <code>game.html</code></p>
+
+    <p>Check your progress (optional): In a new terminal, open <code>game.html</code> in a browser to see the visual foundation the agent just built. You should see a canvas with a star-field and ship art — no gameplay yet.</p>
+
+    <p><strong>Note:</strong> When the browser opens you may see a system dialog that says "Choose password for new keyring". This is a Linux keyring prompt — it is not related to the workshop. Just leave both password fields empty and click Continue.</p>
+
+    <h3>Step 4 — Physics layer</h3>
+
+    <p>In Build Mode, select the <code>physics-movement</code> agent and provide the prompt:</p>
+
+    <pre><code>@physics-movement add player movement, shooting, and collision detection</code></pre>
+
+    <p>This may take 2-3 minutes. The agent is wiring up input handling, bullet physics, and hit detection.</p>
+
+    <p>→ Ship moves, bullets fire, enemies fall, hits register</p>
+
+    <p>Check your progress (optional): Refresh <code>game.html</code> in your browser. You can now move the ship and shoot — but there's no scoring or game-over yet.</p>
+
+    <h3>Step 5 — Gameplay layer</h3>
+
+    <p>In Build Mode, select the <code>gameplay-rules</code> agent and provide the prompt:</p>
+
+    <pre><code>@gameplay-rules add scoring, levels, enemy spawning, lives, and game-over</code></pre>
+
+    <p>This may take 2-3 minutes. The agent is adding the full game loop — scores, waves, lives, and end screens.</p>
+
+    <p>→ Fully playable game.</p>
+
+    <hr />
+
+    <h2>Gameplay Controls</h2>
+
+    <table>
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><code>WASD</code> / <code>Arrows</code></td><td>Move</td></tr>
+      <tr><td><code>Space</code> / <code>Z</code></td><td>Shoot</td></tr>
+      <tr><td><code>X</code></td><td>Fire homing missile</td></tr>
+      <tr><td><code>Shift</code></td><td>Dodge-roll (invincibility frames, 2s cooldown)</td></tr>
+      <tr><td><code>Y</code></td><td>Toggle auto-mode (auto-shoot, auto-missile, auto-dodge)</td></tr>
+      <tr><td><code>P</code></td><td>Pause</td></tr>
+      <tr><td><code>R</code></td><td>Restart</td></tr>
+    </table>
+
+    <hr />
+
+    <h2>Attendee challenges — push the agents further</h2>
+
+    <h3>@ui-renderer</h3>
+    <pre><code>@ui-renderer add a pulsing cyan ring around the player when shield > 0
+add a warp-speed animation when the level increases
+make explosions leave a smoke cloud that fades slowly</code></pre>
+
+    <h3>@physics-movement</h3>
+    <pre><code>@physics-movement add a dodge-roll on Shift with invincibility frames and 2s cooldown
+make cruiser enemies strafe side to side while descending
+add a homing missile on the X key
+make enemies shoot back at the player starting at level 4</code></pre>
+
+    <h3>@gameplay-rules</h3>
+    <pre><code>@gameplay-rules add a score combo — consecutive kills within 1.5s multiply points
+add a shield power-up that drops from bombers with 15% chance
+save the high score to localStorage and show it on game-over
+add a survival wave at level 3 — only drones for 10 seconds</code></pre>
+
+    <hr />
+
+    <h2>Optional — expand to 4 or 5 agents</h2>
+
+    <p>Uncomment the relevant agent in <code>.opencode/config.toml</code>, then:</p>
+
+    <h3>Agent 4 — VFX Polish</h3>
+    <pre><code>@vfx-polish add screen shake on player hit and red vignette when lives = 1
+@vfx-polish add an animated nebula drifting across the star-field
+@vfx-polish add a motion trail behind the player ship</code></pre>
+
+    <h3>Agent 5 — Boss AI</h3>
+    <pre><code>@boss-ai add a 3-phase boss called The Void Sovereign that spawns at level 5</code></pre>
+
+    <hr />
+
+    <h2>Troubleshooting</h2>
+
+    <p><strong>Arrow keys not working</strong> — click the canvas to give it focus, or ask:</p>
+    <pre><code>@physics-movement arrow keys not working — fix keyboard focus on the canvas</code></pre>
+
+    <p><strong>Wrong model selected</strong> — exit OpenCode, run <code>lemonade launch opencode</code> again and select option 7 or 8.</p>
+
+    <p><strong>Keyring password popup</strong> — if a "Choose password for new keyring" dialog appears, leave both fields blank and click Continue. No password is needed.</p>
+
+    <p><strong>Agent broke the game</strong></p>
+    <pre><code>git checkout game.html   # revert to last working state</code></pre>
+
+    <p>Commit after each working feature:</p>
+    <pre><code>git add game.html && git commit -m "feat: what you added"</code></pre>
+
+    <hr />
+
+    <h2>Architecture</h2>
+
+    <div class="arch">
+    <pre>  AMD Ryzen AI Max 395 — Strix Halo — Ubuntu 24.04 + ROCm
+  ┌────────────────────────────────────────────────────┐
+  │                                                    │
+  │  lemonade launch opencode                          │
+  │  └─► Lemonade Server  (on-device GPU inference)   │
+  │       └─► Qwen3.6-35B-A3B-ThinkingCoder           │
+  │                                                    │
+  │  OpenCode TUI                                      │
+  │  ├─ @ui-renderer      ──► ui-renderer.md           │
+  │  ├─ @physics-movement ──► physics-movement.md      │
+  │  ├─ @gameplay-rules   ──► gameplay-rules.md        │
+  │  ├─ @vfx-polish       ──► vfx-polish.md  (opt)    │
+  │  └─ @boss-ai          ──► boss-ai.md     (opt)     │
+  │                 ↓                                  │
+  │            game.html  ←  single file, double-click │
+  └────────────────────────────────────────────────────┘</pre>
+    </div>
+
+  </div>
+
 </body>
-</html>
