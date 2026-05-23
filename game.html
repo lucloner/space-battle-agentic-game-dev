@@ -1839,8 +1839,248 @@
     loop();
   </script>
 
+  <!-- Touch virtual gamepad -->
+  <div id="gamepad">
+    <div id="gp-left">
+      <div id="joystick-zone">
+        <div id="joystick-knob"></div>
+      </div>
+    </div>
+    <div id="gp-right">
+      <button class="gp-btn gp-fire"    data-key="Space">FIRE</button>
+      <button class="gp-btn gp-missile" data-key="KeyX">MSL</button>
+      <button class="gp-btn gp-dodge"   data-key="ShiftLeft">DODGE</button>
+      <button class="gp-btn gp-auto"    data-key="KeyY">AUTO</button>
+    </div>
+    <div id="gp-bottom">
+      <button class="gp-btn gp-pause"   data-key="KeyP">PAUSE</button>
+      <button class="gp-btn gp-restart" data-key="KeyR">RESTART</button>
+    </div>
+  </div>
+
+  <style>
+    #gamepad {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      pointer-events: none;
+      touch-action: none;
+    }
+    @media (pointer: coarse) {
+      #gamepad { display: block; }
+    }
+    #gp-left {
+      position: absolute;
+      bottom: 40px;
+      left: 30px;
+      width: 140px;
+      height: 140px;
+      pointer-events: auto;
+    }
+    #joystick-zone {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.08);
+      border: 2px solid rgba(255,255,255,0.2);
+      position: relative;
+      touch-action: none;
+    }
+    #joystick-knob {
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background: rgba(0,229,255,0.5);
+      border: 2px solid rgba(0,229,255,0.8);
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%,-50%);
+      pointer-events: none;
+    }
+    #gp-right {
+      position: absolute;
+      bottom: 40px;
+      right: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      pointer-events: auto;
+    }
+    .gp-btn {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.3);
+      background: rgba(255,255,255,0.1);
+      color: #fff;
+      font: bold 11px 'Courier New',monospace;
+      cursor: pointer;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .gp-btn:active, .gp-btn.pressed {
+      background: rgba(0,229,255,0.4);
+      border-color: #00e5ff;
+    }
+    .gp-fire    { border-color: #00e5ff; color: #00e5ff; }
+    .gp-missile { border-color: #ff6bff; color: #ff6bff; }
+    .gp-dodge   { border-color: #ffeb3b; color: #ffeb3b; }
+    .gp-auto    { border-color: #6c5ce7; color: #6c5ce7; }
+    .gp-auto.active { background: rgba(108,92,231,0.5); }
+    #gp-bottom {
+      position: absolute;
+      bottom: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 16px;
+      pointer-events: auto;
+    }
+    #gp-bottom .gp-btn {
+      width: 80px;
+      height: 40px;
+      border-radius: 20px;
+      font-size: 12px;
+    }
+  </style>
+
+  <script>
+    // Virtual gamepad logic
+    (function(){
+      const gp = document.getElementById('gamepad');
+      if (!gp) return;
+
+      const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      if (!isTouch) { gp.style.display = 'none'; return; }
+      gp.style.display = 'block';
+
+      // ── Joystick ──
+      const zone = document.getElementById('joystick-zone');
+      const knob = document.getElementById('joystick-knob');
+      const R = 45; // max knob offset
+      const keysActive = {};
+
+      function setKey(code, down) {
+        if (keysActive[code] === down) return;
+        keysActive[code] = down;
+        window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', {
+          code, key: code, bubbles: true
+        }));
+      }
+
+      function handleJoystick(clientX, clientY) {
+        const rect = zone.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        let dx = clientX - cx;
+        let dy = clientY - cy;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > R) { dx = dx/dist*R; dy = dy/dist*R; }
+        knob.style.transform = `translate(calc(-50% + ${dx}px),calc(-50% + ${dy}px))`;
+
+        const threshold = 15;
+        setKey('KeyA', dx < -threshold);
+        setKey('KeyD', dx >  threshold);
+        setKey('KeyW', dy < -threshold);
+        setKey('KeyS', dy >  threshold);
+      }
+
+      function resetJoystick() {
+        knob.style.transform = 'translate(-50%,-50%)';
+        setKey('KeyA', false);
+        setKey('KeyD', false);
+        setKey('KeyW', false);
+        setKey('KeyS', false);
+      }
+
+      let joystickTouchId = null;
+      zone.addEventListener('touchstart', e => {
+        e.preventDefault();
+        if (joystickTouchId !== null) return;
+        const t = e.changedTouches[0];
+        joystickTouchId = t.identifier;
+        handleJoystick(t.clientX, t.clientY);
+      }, {passive: false});
+      zone.addEventListener('touchmove', e => {
+        e.preventDefault();
+        for (const t of e.changedTouches) {
+          if (t.identifier === joystickTouchId) {
+            handleJoystick(t.clientX, t.clientY);
+          }
+        }
+      }, {passive: false});
+      zone.addEventListener('touchend', e => {
+        for (const t of e.changedTouches) {
+          if (t.identifier === joystickTouchId) {
+            joystickTouchId = null;
+            resetJoystick();
+          }
+        }
+      });
+      zone.addEventListener('touchcancel', () => {
+        joystickTouchId = null;
+        resetJoystick();
+      });
+
+      // ── Buttons ──
+      const buttons = gp.querySelectorAll('.gp-btn');
+      const toggleKeys = { KeyY: true, KeyP: true };
+
+      buttons.forEach(btn => {
+        const code = btn.dataset.key;
+        const isToggle = toggleKeys[code];
+        let pressed = false;
+
+        btn.addEventListener('touchstart', e => {
+          e.preventDefault();
+          if (isToggle) {
+            // Toggle: simulate one keydown then keyup
+            window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true }));
+            window.dispatchEvent(new KeyboardEvent('keyup', { code, key: code, bubbles: true }));
+            if (code === 'KeyY') btn.classList.toggle('active');
+          } else {
+            pressed = true;
+            btn.classList.add('pressed');
+            window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true }));
+          }
+        }, {passive: false});
+
+        btn.addEventListener('touchend', e => {
+          e.preventDefault();
+          if (!isToggle && pressed) {
+            pressed = false;
+            btn.classList.remove('pressed');
+            window.dispatchEvent(new KeyboardEvent('keyup', { code, key: code, bubbles: true }));
+          }
+        }, {passive: false});
+
+        btn.addEventListener('touchcancel', e => {
+          if (!isToggle && pressed) {
+            pressed = false;
+            btn.classList.remove('pressed');
+            window.dispatchEvent(new KeyboardEvent('keyup', { code, key: code, bubbles: true }));
+          }
+        });
+      });
+
+      // Reset auto button state on game restart
+      const autoBtn = document.querySelector('.gp-auto');
+      if (autoBtn) {
+        const _orig = resetGame;
+        resetGame = function() {
+          autoBtn.classList.remove('active');
+          return _orig.apply(this, arguments);
+        };
+      }
+    })();
+  </script>
+
   <div class="doc">
-    <p>秘笈：按Y自动射击</p>
+
+    <p style="color:#6c5ce7;font-weight:bold;">秘笈：按 Y 键切换自动模式（自动射击 + 导弹 + 闪避）</p>
 
     <h1>Space Blaster — Agentic Game Development Workshop</h1>
 
